@@ -29,7 +29,7 @@ jobs:
           tags: |
             ${{ secrets.ACR_LOGIN_SERVER }}/fastapi:latest
 
-        - name: Restart App Service
+      - name: Restart App Service
         uses: azure/cli@v2
         with:
           inlineScript: |
