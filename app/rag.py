@@ -95,7 +95,7 @@ def generate_embeddings(text):
     return response.data[0].embedding
 
 def delete_any_existing_documents(fileName):
-    results = search_client.search(search_text="*", select="*", filter= f"source eq '{fileName}'")
+    results = search_client.search(search_text="*", select="*", filter= f"source_document eq '{fileName}'")
     
     keys_to_delete = []
     for doc in results:
