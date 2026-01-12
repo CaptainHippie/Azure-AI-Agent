@@ -1,4 +1,4 @@
-from azure.search.documents.models import VectorizedQuery
+from azure.search.documents.models import VectorizableTextQuery
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from openai import AzureOpenAI
@@ -27,59 +27,49 @@ search_client = SearchClient(
     credential=AzureKeyCredential(os.getenv("AZURE_SEARCH_API_KEY"))
 )
 
-# --- 3. The Tool Function (The actual RAG retrieval) ---
-def search_knowledge_base(query: str, filename_filter: str = None):
+def search_knowledge_base(query: str, filename_filter: str = None, count: int = 5):
     """
-    Retreives relevant context chunks from the Azure AI Search index.
+    Retrieves context from Azure AI Search.
+    IMPORTANT: filename_filter is passed from the Python Backend, NOT the LLM.
     """
     print(f"🛠️ Tool Triggered: Searching for '{query}' in '{filename_filter}'")
+
+    vector_query = VectorizableTextQuery(text=query, k_nearest_neighbors=count * 2, fields="text_vector")
     
-    # Generate embedding for the query
-    embedding_response = openai_client.embeddings.create(
-        input=query,
-        model=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
-    )
-    query_vector = embedding_response.data[0].embedding
-
-    # Create Filter string (OData format)
-    filter_str = None
-    if filename_filter:
-        filter_str = f"source eq '{filename_filter}'"
-
-    # Search Azure AI Search
     results = search_client.search(
         search_text=query,
-        vector_queries=[VectorizedQuery(vector=query_vector, k_nearest_neighbors=3, fields="vector")],
-        filter=filter_str,
-        select=["content", "source"]
+        vector_queries=[vector_query],
+        top=count,
+        filter=f"source_document eq '{filename_filter}'" if filename_filter else None,
+        search_fields=["content"],  # Fields to search
+        select=['content', 'source_url', 'source_document', 'chunk_index']
     )
 
-    # Format results for the LLM
-    context = []
-    sources = set()
-    for res in results:
-        context.append(res['content'])
-        sources.add(res['source'])
-        
-    return json.dumps({"context": "\n\n".join(context), "sources": list(sources)})
+    # 4. Format Output
+    sources = {}
+    for doc in results:
+        doc_name = doc['source_document']
+        if doc_name not in sources:
+            sources[doc_name] = {
+                "url": doc['source_url'], 
+                "context": []
+            }
+        sources[doc_name]['context'].append(doc['content'])
+    return sources
 
-# --- 4. Tool Definition (Schema for OpenAI) ---
+# --- Tool Definition ---
 tools = [
     {
         "type": "function",
         "function": {
             "name": "search_knowledge_base",
-            "description": "Searches internal documents for factual information. Use this when the user asks about policies, technical details, or specific document content.",
+            "description": "Searches the document knowledge base.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query to look up in the vector database."
-                    },
-                    "filename_filter": {
-                        "type": "string",
-                        "description": "The specific filename to search in, if the user context implies a specific document."
+                        "description": "Optimized search query based on user question."
                     }
                 },
                 "required": ["query"]
@@ -88,35 +78,34 @@ tools = [
     }
 ]
 
-# --- 5. The System Prompt ---
+
 SYSTEM_PROMPT = """
-You are an intelligent corporate assistant. 
+You are a highly precise Research Assistant for a corporation. 
 
-DECISION LOGIC:
-1. If the user asks a general question (greeting, math, joke, coding help), ANSWER DIRECTLY. Do not use tools.
-2. If the user asks about internal information, company policies, or specific documents, YOU MUST USE the 'search_knowledge_base' tool.
+### CORE INSTRUCTIONS:
+1. **Efficiency:** If the user asks a general question (greeting, math, joke, coding help), ANSWER DIRECTLY. Do not use tools.
+2.  **Grounding:** You must answer the user's question PRIMARILY based on the context provided by the tool `search_knowledge_base`.
+3.  **Citation:** Every factual statement you make must be immediately followed by a citation in the format `[Source: DocumentName]`. 
+    - Example: "The vacation policy allows 20 days off [Source: employee_handbook.pdf]."
+4.  **No Hallucination:** If the tool results do not contain the answer, explicitly state: "I cannot find this information in the provided document."
+5.  **Style:** Be professional, direct, and structured. Use Markdown headers and bullet points where appropriate.
 
-OUTPUT RULES:
-- Be concise and professional.
-- If you use the tool, base your answer ONLY on the returned context.
-- If the tool returns no information, say "I couldn't find that information in the documents."
+### TOOL USAGE:
+- You have access to a search tool. You MUST use it for every query regarding document content.
+- Ignore the file selection argument in the tool; the system handles that. Focus on generating the best search query.
 """
 
-# --- 6. Main Agent Function ---
+
+# --- Main Loop ---
 def run_agent(user_query: str, session_id: str, target_file: str = None):
     
-    # A. Retrieve or Init History
     if session_id not in SESSION_MEMORY:
-        SESSION_MEMORY[session_id] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
+        SESSION_MEMORY[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     
     history = SESSION_MEMORY[session_id]
-    
-    # B. Append User Message
     history.append({"role": "user", "content": user_query})
     
-    # C. First Call to LLM (Does it want to run a tool?)
+    # 1. Call LLM
     response = openai_client.chat.completions.create(
         model=gpt_engine_4_1_mini, # e.g., gpt-4o or gpt-35-turbo
         messages=history,
@@ -125,34 +114,26 @@ def run_agent(user_query: str, session_id: str, target_file: str = None):
     )
     
     response_message = response.choices[0].message
-    final_sources = []
+    final_sources = {}
 
-    # D. Check if Tool was called
     if response_message.tool_calls:
-        # 1. Add the assistant's "intent to call tool" to history
         history.append(response_message)
         
         for tool_call in response_message.tool_calls:
             if tool_call.function.name == "search_knowledge_base":
-                
-                # Parse arguments
                 args = json.loads(tool_call.function.arguments)
-                # Force the filter if provided by the API request
-                search_filter = target_file if target_file else args.get("filename_filter")
+
+                # INJECT THE FILTER HERE (Override whatever LLM thinks)
+                sources = search_knowledge_base(args["query"], filename_filter=target_file)
+                final_sources.update(sources) # Merge findings
+
+                context_str = json.dumps(sources)
                 
-                # Execute the actual Python function
-                tool_result_json = search_knowledge_base(args["query"], search_filter)
-                
-                # Parse output to track sources
-                tool_data = json.loads(tool_result_json)
-                final_sources.extend(tool_data.get("sources", []))
-                
-                # 2. Add the tool result to history
                 history.append({
                     "tool_call_id": tool_call.id,
                     "role": "tool",
                     "name": "search_knowledge_base",
-                    "content": tool_result_json
+                    "content": context_str
                 })
         
         # 3. Second Call to LLM (Process the tool output)
@@ -171,4 +152,4 @@ def run_agent(user_query: str, session_id: str, target_file: str = None):
     # Update Memory
     SESSION_MEMORY[session_id] = history
     
-    return answer_text, list(set(final_sources))
+    return answer_text, final_sources
