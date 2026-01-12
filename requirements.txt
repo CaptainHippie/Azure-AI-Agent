@@ -1,0 +1,11 @@
+python-dotenv
+fastapi
+uvicorn
+python-multipart
+azure-ai-documentintelligence
+azure-storage-blob
+azure-search-documents
+chonkie
+pypdf
+openai
+Werkzeug
