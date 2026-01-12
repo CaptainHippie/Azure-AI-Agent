@@ -28,3 +28,11 @@ jobs:
           push: true
           tags: |
             ${{ secrets.ACR_LOGIN_SERVER }}/fastapi:latest
+
+        - name: Restart App Service
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az webapp restart \
+              --name ${{ secrets.WEBAPP_NAME }} \
+              --resource-group ${{ secrets.RESOURCE_GROUP }}
