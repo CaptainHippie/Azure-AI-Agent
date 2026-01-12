@@ -6,8 +6,8 @@ from chonkie import RecursiveChunker
 from azure.search.documents import SearchClient
 from werkzeug.utils import secure_filename
 from openai import AzureOpenAI
-import os
 import base64
+import os
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -94,6 +94,16 @@ def generate_embeddings(text):
     )
     return response.data[0].embedding
 
+def delete_any_existing_documents(fileName):
+    results = search_client.search(search_text="*", select="*", filter= f"source eq '{fileName}'")
+    
+    keys_to_delete = []
+    for doc in results:
+        keys_to_delete.append({"@search.action": "delete", "id": doc["id"]})
+    
+    if keys_to_delete:
+        search_client.upload_documents(keys_to_delete)
+
 def process_and_index_document(filename: str, file_url: str):
     """
     Downloads from Blob -> Doc Intel -> Chonkie -> Embed -> AI Search -> Update Blob Tag
@@ -115,7 +125,7 @@ def process_and_index_document(filename: str, file_url: str):
     embeddings = openai_batch_embedding([chunk.text for chunk in chunks])
     # D. Embed & Prepare for Azure Search
     search_documents = [{
-        "id": f"{filename}_{i + 1}",
+        "id": base64.urlsafe_b64encode(f"{filename}_{i}".encode()).decode(),
         "content": chunk.text,
         "text_vector": embeddings[i],
         "chunk_index": i + 1,
@@ -125,6 +135,7 @@ def process_and_index_document(filename: str, file_url: str):
 
     # E. Upload to Azure AI Search
     if search_documents:
+        delete_any_existing_documents(filename)
         search_client.upload_documents(documents=search_documents)
         print(f"Uploaded {len(search_documents)} chunks to Azure AI Search.")
 
