@@ -20,7 +20,7 @@ app = FastAPI(title="AI Policy Agent")
 # Health Check (Good for Azure)
 @app.get("/")
 async def root():
-    return {"status": "running smoothly"}
+    return {"status": "running smoothly again"}
 
 
 @app.post("/upload")
