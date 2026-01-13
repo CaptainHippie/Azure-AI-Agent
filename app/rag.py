@@ -85,15 +85,6 @@ def list_indexed_files():
     return files
 
 # --- 2. Processing Pipeline ---
-
-def generate_embeddings(text):
-    """Generates vector using Azure OpenAI."""
-    response = openai_client.embeddings.create(
-        input=text,
-        model=os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT")
-    )
-    return response.data[0].embedding
-
 def delete_any_existing_documents(fileName):
     results = search_client.search(search_text="*", select="*", filter= f"source_document eq '{fileName}'")
     
@@ -109,9 +100,6 @@ def process_and_index_document(filename: str, file_url: str):
     Downloads from Blob -> Doc Intel -> Chonkie -> Embed -> AI Search -> Update Blob Tag
     """
     print(f"Starting pipeline for {filename}...")
-
-    # A. Get file bytes from Blob (Since DocIntel needs URL or Bytes)
-    #container_client.download_blob(blob=filename).content_as_bytes()
 
     result = Return_Poller_Result(file_url)
     markdown_text = result.content

@@ -8,7 +8,7 @@ load_dotenv()
 API_ENDPOINT = os.getenv('API_ENDPOINT')
 
 st.set_page_config(page_title="AI Agent", layout="wide")
-st.title("📄 AI Policy Agent")
+st.title("📄 AI Document Chat Agent")
 
 # --- CSS for Perplexity-style Citations ---
 st.markdown("""
