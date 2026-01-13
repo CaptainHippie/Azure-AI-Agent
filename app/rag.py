@@ -2,7 +2,7 @@ from azure.ai.documentintelligence.models import AnalyzeDocumentRequest, StringI
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.documentintelligence import DocumentIntelligenceClient
 from azure.storage.blob import ContainerClient
-from chonkie import RecursiveChunker
+from chonkie import RecursiveChunker, OverlapRefinery
 from azure.search.documents import SearchClient
 from werkzeug.utils import secure_filename
 from openai import AzureOpenAI
@@ -68,7 +68,17 @@ def chunk_to_documents(text):
         chunk_size=512,
         min_characters_per_chunk=100,
     )
-    return chunker.chunk(text)
+    overlap_refinery = OverlapRefinery(
+        tokenizer="word",            
+        mode='recursive',
+        context_size=0.1,         
+        method= "suffix", 
+        merge=True,                       
+        inplace=False
+    )
+    chunks = chunker.chunk(text)
+    refined_chunks = overlap_refinery(chunks)
+    return refined_chunks
 
 def openai_batch_embedding(texts):
     """
