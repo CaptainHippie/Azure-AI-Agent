@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import time
+import uuid
 from dotenv import load_dotenv
 import os
 load_dotenv()
@@ -9,6 +10,14 @@ API_ENDPOINT = os.getenv('API_ENDPOINT')
 
 st.set_page_config(page_title="AI Agent", layout="wide")
 st.title("📄 AI Document Chat Agent")
+
+# --- Session Management ---
+# Generate a unique ID for this browser tab if one doesn't exist
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+    
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 # --- CSS for Perplexity-style Citations ---
 st.markdown("""
@@ -28,6 +37,19 @@ st.markdown("""
 
 # --- Sidebar ---
 st.sidebar.header("Knowledge Base")
+
+# Clear Memory Button
+if st.sidebar.button("🗑️ Clear Chat Memory"):
+    try:
+        # 1. Tell Backend to forget us
+        requests.delete(f"{API_ENDPOINT}/session/{st.session_state.session_id}")
+        # 2. Clear Frontend UI
+        st.session_state.messages = []
+        st.sidebar.success("Memory Wiped!")
+        time.sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.sidebar.error(f"Failed to clear memory: {e}")
 
 # 1. File Upload with Polling
 uploaded_file = st.sidebar.file_uploader("Upload PDF", type="pdf")
@@ -103,8 +125,6 @@ for msg in st.session_state.messages:
                 for doc_name, details in msg["sources"].items():
                     url = details.get("url", "#")
                     st.markdown(f"**📄 [{doc_name}]({url})**")
-                    # Optionally show a snippet
-                    # st.text(details['context'][0][:200] + "...")
 
 if prompt := st.chat_input("Ask a question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -118,7 +138,7 @@ if prompt := st.chat_input("Ask a question..."):
         try:
             payload = {
                 "query": prompt,
-                "session_id": "streamlit_user_1",
+                "session_id": st.session_state.session_id,
                 "target_file": selected_doc
             }
             

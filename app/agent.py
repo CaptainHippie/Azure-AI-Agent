@@ -13,9 +13,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent")
 
-# --- Global State ---
-# In a real production environment, this should be replaced by Redis or CosmosDB
+# In-Memory State
 SESSION_MEMORY = {}
+MAX_HISTORY_LIMIT = int(os.getenv('MAX_HISTORY_LIMIT'))  # Keep last 10 messages (excluding system prompt)
 
 # --- Client Initialization ---
 gpt_engine_4_1_mini = os.getenv('AZURE_OPENAI_DEPLOYMENT_GPT4_1_MINI')
@@ -102,13 +102,21 @@ You are a highly precise Research Assistant for a corporation.
 
 ### TOOL USAGE:
 - You have access to a search tool. You MUST use it for every query regarding document content.
-- Ignore the file selection argument in the tool; the system handles that. Focus on generating the best search query.
 """
+
+# --- Memory Management ---
+
+def clear_session_memory(session_id: str):
+    """Wipes the memory for a specific user session."""
+    if session_id in SESSION_MEMORY:
+        del SESSION_MEMORY[session_id]
+        logger.info(f"Memory cleared for session: {session_id}")
 
 # --- Main Agent Loop ---
 
 def run_agent(user_query: str, session_id: str, target_file: str = None):
     
+    # Initialize with System Prompt if new session
     if session_id not in SESSION_MEMORY:
         SESSION_MEMORY[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
     
@@ -163,7 +171,14 @@ def run_agent(user_query: str, session_id: str, target_file: str = None):
         answer_text = response_message.content
         history.append({"role": "assistant", "content": answer_text})
 
-    # Update session state
+    # --- Sliding Window Logic ---
+    # We always preserve the System Prompt [0].
+    # If history grows too large, we trim the oldest messages after the system prompt.
+    if len(history) > MAX_HISTORY_LIMIT + 1:
+        # Keep System Prompt + Last N messages
+        history = [history[0]] + history[-MAX_HISTORY_LIMIT:]
+        logger.info(f"History trimmed for session {session_id}")
+
     SESSION_MEMORY[session_id] = history
-    
+
     return answer_text, final_sources

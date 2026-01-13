@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from app.rag import upload_to_blob, process_and_index_document, list_indexed_files
 from app.utils import validate_pdf_size
 from app.models import AskRequest, AskResponse
-from app.agent import run_agent
+from app.agent import run_agent, clear_session_memory
 from azure.storage.blob import ContainerClient
 from dotenv import load_dotenv
 import os
@@ -85,3 +85,12 @@ async def ask_question(request: AskRequest):
         target_file=request.target_file
     )
     return AskResponse(answer=answer, source=sources)
+
+@app.delete("/session/{session_id}")
+async def reset_session(session_id: str):
+    """
+    Clears the conversation history for a specific session ID.
+    Called when the user clicks 'Clear Chat' in the UI.
+    """
+    clear_session_memory(session_id)
+    return {"status": "memory_cleared", "session_id": session_id}
