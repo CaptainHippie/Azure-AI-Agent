@@ -19,8 +19,8 @@ graph TD
     Frontend -->|HTTP Requests| Backend[FastAPI Service]
     
     subgraph "Backend Core"
-        Backend -->|Routing| Agent[AI Agent (GPT-4.1 Mini)]
-        Agent -->|Decision| Logic{Tool Call?}
+        Backend -->|Routing| Agent["AI Agent (GPT-4.1 Mini)"]
+        Agent -->|Decision| Logic{"Tool Call?"}
         Logic -->|No| LLM[Direct Answer]
         Logic -->|Yes| SearchTool[Azure AI Search]
     end

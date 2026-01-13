@@ -2,19 +2,24 @@ from azure.search.documents.models import VectorizableTextQuery
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from openai import AzureOpenAI
+import logging
 import json
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- 1. Global In-Memory Memory (For Assignment Purposes) ---
-# In production, use Redis or a Database
+# Configure logging to output to console (captured by Azure Logs)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("agent")
+
+# --- Global State ---
+# In a real production environment, this should be replaced by Redis or CosmosDB
 SESSION_MEMORY = {}
 
-# --- 2. Setup Clients ---
-gpt_engine_4_1 = os.getenv('AZURE_OPENAI_DEPLOYMENT_GPT4_1')
+# --- Client Initialization ---
 gpt_engine_4_1_mini = os.getenv('AZURE_OPENAI_DEPLOYMENT_GPT4_1_MINI')
+
 openai_client = AzureOpenAI(
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
@@ -27,12 +32,16 @@ search_client = SearchClient(
     credential=AzureKeyCredential(os.getenv("AZURE_SEARCH_API_KEY"))
 )
 
+# --- Tool Logic ---
+
 def search_knowledge_base(query: str, filename_filter: str = None, count: int = 5):
     """
-    Retrieves context from Azure AI Search.
-    IMPORTANT: filename_filter is passed from the Python Backend, NOT the LLM.
+    Executes a Hybrid Search (Keyword + Vector) against the Azure Index.
+    
+    The filename_filter is critical here: it ensures we only search within
+    the specific document the user selected in the UI, preventing context pollution.
     """
-    print(f"🛠️ Tool Triggered: Searching for '{query}' in '{filename_filter}'")
+    logger.info(f"Tool Action: Searching for '{query}' in document: '{filename_filter}'")
 
     vector_query = VectorizableTextQuery(text=query, k_nearest_neighbors=count * 2, fields="text_vector")
     
@@ -40,12 +49,12 @@ def search_knowledge_base(query: str, filename_filter: str = None, count: int = 
         search_text=query,
         vector_queries=[vector_query],
         top=count,
+        # Only apply OData filter if a specific file was targeted
         filter=f"source_document eq '{filename_filter}'" if filename_filter else None,
-        search_fields=["content"],  # Fields to search
+        search_fields=["content"], 
         select=['content', 'source_url', 'source_document', 'chunk_index']
     )
 
-    # 4. Format Output
     sources = {}
     for doc in results:
         doc_name = doc['source_document']
@@ -55,9 +64,11 @@ def search_knowledge_base(query: str, filename_filter: str = None, count: int = 
                 "context": []
             }
         sources[doc_name]['context'].append(doc['content'])
+    
     return sources
 
-# --- Tool Definition ---
+# --- Agent Configuration ---
+
 tools = [
     {
         "type": "function",
@@ -78,7 +89,6 @@ tools = [
     }
 ]
 
-
 SYSTEM_PROMPT = """
 You are a highly precise Research Assistant for a corporation. 
 
@@ -95,8 +105,8 @@ You are a highly precise Research Assistant for a corporation.
 - Ignore the file selection argument in the tool; the system handles that. Focus on generating the best search query.
 """
 
+# --- Main Agent Loop ---
 
-# --- Main Loop ---
 def run_agent(user_query: str, session_id: str, target_file: str = None):
     
     if session_id not in SESSION_MEMORY:
@@ -105,9 +115,9 @@ def run_agent(user_query: str, session_id: str, target_file: str = None):
     history = SESSION_MEMORY[session_id]
     history.append({"role": "user", "content": user_query})
     
-    # 1. Call LLM
+    # 1. Initial LLM Call (Decision Phase)
     response = openai_client.chat.completions.create(
-        model=gpt_engine_4_1_mini, # e.g., gpt-4o or gpt-35-turbo
+        model=gpt_engine_4_1_mini,
         messages=history,
         tools=tools,
         tool_choice="auto" 
@@ -116,27 +126,31 @@ def run_agent(user_query: str, session_id: str, target_file: str = None):
     response_message = response.choices[0].message
     final_sources = {}
 
+    # 2. Check for Tool Execution
     if response_message.tool_calls:
+        logger.info(f"Agent decided to use tool: {response_message.tool_calls[0].function.name}")
+        
         history.append(response_message)
         
         for tool_call in response_message.tool_calls:
             if tool_call.function.name == "search_knowledge_base":
                 args = json.loads(tool_call.function.arguments)
 
-                # INJECT THE FILTER HERE (Override whatever LLM thinks)
+                # explicit document filter passed from the Frontend
                 sources = search_knowledge_base(args["query"], filename_filter=target_file)
-                final_sources.update(sources) # Merge findings
-
-                context_str = json.dumps(sources)
                 
+                final_sources.update(sources)
+
+                # We pass the content back to the LLM so it can generate the answer
+                # We serialize to JSON to keep the structure clear for the model
                 history.append({
                     "tool_call_id": tool_call.id,
                     "role": "tool",
                     "name": "search_knowledge_base",
-                    "content": context_str
+                    "content": json.dumps(sources)
                 })
         
-        # 3. Second Call to LLM (Process the tool output)
+        # 3. Final LLM Call (Response Generation Phase)
         final_response = openai_client.chat.completions.create(
             model=gpt_engine_4_1_mini,
             messages=history
@@ -145,11 +159,11 @@ def run_agent(user_query: str, session_id: str, target_file: str = None):
         history.append({"role": "assistant", "content": answer_text})
         
     else:
-        # No tool used (General Chat)
+        logger.info("Agent decided to answer directly (No tool used)")
         answer_text = response_message.content
         history.append({"role": "assistant", "content": answer_text})
 
-    # Update Memory
+    # Update session state
     SESSION_MEMORY[session_id] = history
     
     return answer_text, final_sources

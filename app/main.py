@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import os
 
 load_dotenv()
+
 container_client = ContainerClient.from_connection_string(
     conn_str=os.getenv('AZURE_STORAGE_CONTAINER_CONN_STRING'), 
     container_name=os.getenv("AZURE_STORAGE_CONTAINER_NAME")
@@ -15,50 +16,51 @@ container_client = ContainerClient.from_connection_string(
 
 app = FastAPI(title="AI Policy Agent")
 
-# Health Check (Good for Azure)
+# Simple health check for Azure App Service to verify the container is up
 @app.get("/")
 async def root():
     return {"status": "running smoothly with ci/cd"}
 
-# Helper to check status quickly
 @app.get("/status/{filename}")
 def check_file_status(filename: str):
-    """Checks metadata of the blob to see if indexing is complete."""
+    """
+    Polls the blob metadata to see if the indexing pipeline has marked it as 'ready'.
+    This allows the frontend to wait without blocking the connection.
+    """
     try:
         blob = container_client.get_blob_client(filename)
         props = blob.get_blob_properties()
-        # Look for the metadata/tags we set in rag.py
+        
+        # We track progress using metadata tags on the blob itself
         status = props.metadata.get("status", "unknown")
         return {"filename": filename, "status": status}
     except Exception:
         return {"filename": filename, "status": "not_found"}
-
-
+    
 @app.post("/upload")
 async def upload_pdf(
     background_tasks: BackgroundTasks, 
     file: UploadFile = File(...)
 ):
-    # 1. Quick Validations
+    # Validate file type and size before starting expensive Azure processes
     if not file.filename.endswith(".pdf"):
         raise HTTPException(400, "Only PDFs allowed")
     
     try:
-        # Check page limits (fast check)
         validate_pdf_size(file)
     except HTTPException as e:
-        raise e # Re-raise to send 400 to client
+        raise e 
     except Exception as e:
         raise HTTPException(400, f"Corrupt file: {str(e)}")
 
-    # 2. Upload to Blob
+    # Upload to storage first so the background task can access the file independently
     file_content = await file.read()
     clean_filename, document_url = upload_to_blob(file_content, file.filename)
     
-    # 3. Background Indexing
+    # Offload the heavy lifting (OCR, Embedding, Indexing) to a background task
+    # This keeps the UI responsive while the pipeline runs
     background_tasks.add_task(process_and_index_document, clean_filename, document_url)
     
-    # Return specific status so Streamlit knows to start polling
     return {
         "message": "Upload successful", 
         "filename": clean_filename, 
@@ -67,12 +69,16 @@ async def upload_pdf(
 
 @app.get("/files")
 def get_available_documents():
-    """Returns list of documents that have finished indexing."""
+    """Lists only the files that have completed indexing and are ready for chat."""
     files = list_indexed_files()
     return {"documents": files}
 
 @app.post("/ask", response_model=AskResponse)
 async def ask_question(request: AskRequest):
+    """
+    Main chat endpoint. Routes the user query and session context 
+    to the Agent logic.
+    """
     answer, sources = run_agent(
         user_query=request.query, 
         session_id=request.session_id,
